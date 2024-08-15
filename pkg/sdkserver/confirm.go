@@ -10,6 +10,7 @@ import (
 	gcontext "github.com/gptscript-ai/gptscript/pkg/context"
 	"github.com/gptscript-ai/gptscript/pkg/engine"
 	"github.com/gptscript-ai/gptscript/pkg/runner"
+	"github.com/gptscript-ai/gptscript/pkg/sdkserver/threads"
 	gserver "github.com/gptscript-ai/gptscript/pkg/server"
 )
 
@@ -41,12 +42,12 @@ func (s *server) authorize(ctx engine.Context, input string) (runner.AuthorizerR
 		s.lock.Unlock()
 	}(ctx.ID)
 
-	s.events.C <- event{
+	s.events.C <- threads.GPTScriptEvent{
 		Event: gserver.Event{
 			Event: runner.Event{
 				Time:        time.Now(),
 				CallContext: ctx.GetCallContext(),
-				Type:        CallConfirm,
+				Type:        threads.CallConfirm,
 			},
 			Input: input,
 			RunID: runID,

@@ -8,15 +8,16 @@ import (
 	"github.com/gptscript-ai/broadcaster"
 	"github.com/gptscript-ai/gptscript/pkg/engine"
 	"github.com/gptscript-ai/gptscript/pkg/runner"
+	"github.com/gptscript-ai/gptscript/pkg/sdkserver/threads"
 	gserver "github.com/gptscript-ai/gptscript/pkg/server"
 	"github.com/gptscript-ai/gptscript/pkg/types"
 )
 
 type SessionFactory struct {
-	events *broadcaster.Broadcaster[event]
+	events *broadcaster.Broadcaster[threads.GPTScriptEvent]
 }
 
-func NewSessionFactory(events *broadcaster.Broadcaster[event]) *SessionFactory {
+func NewSessionFactory(events *broadcaster.Broadcaster[threads.GPTScriptEvent]) *SessionFactory {
 	return &SessionFactory{
 		events: events,
 	}
@@ -27,7 +28,7 @@ func (s SessionFactory) Start(ctx context.Context, prg *types.Program, env []str
 	category := engine.ToolCategoryFromContext(ctx)
 
 	if category == engine.NoCategory {
-		s.events.C <- event{
+		s.events.C <- threads.GPTScriptEvent{
 			Event: gserver.Event{
 				Event: runner.Event{
 					Time: time.Now(),
@@ -57,14 +58,14 @@ type Session struct {
 	prj     *types.Program
 	env     []string
 	input   string
-	events  *broadcaster.Broadcaster[event]
+	events  *broadcaster.Broadcaster[threads.GPTScriptEvent]
 	runLock sync.Mutex
 }
 
 func (s *Session) Event(e runner.Event) {
 	s.runLock.Lock()
 	defer s.runLock.Unlock()
-	s.events.C <- event{
+	s.events.C <- threads.GPTScriptEvent{
 		Event: gserver.Event{
 			Event: e,
 			RunID: s.id,
@@ -80,7 +81,7 @@ func (s *Session) Stop(ctx context.Context, output string, err error) {
 		return
 	}
 
-	e := event{
+	e := threads.GPTScriptEvent{
 		Event: gserver.Event{
 			Event: runner.Event{
 				Time: time.Now(),

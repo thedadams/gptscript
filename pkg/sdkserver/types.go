@@ -1,30 +1,16 @@
 package sdkserver
 
 import (
-	"maps"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/gptscript-ai/gptscript/pkg/cache"
-	"github.com/gptscript-ai/gptscript/pkg/engine"
 	"github.com/gptscript-ai/gptscript/pkg/openai"
 	"github.com/gptscript-ai/gptscript/pkg/parser"
 	"github.com/gptscript-ai/gptscript/pkg/runner"
-	gserver "github.com/gptscript-ai/gptscript/pkg/server"
+	"github.com/gptscript-ai/gptscript/pkg/sdkserver/threads"
 	"github.com/gptscript-ai/gptscript/pkg/types"
-)
-
-type runState string
-
-const (
-	Creating runState = "creating"
-	Running  runState = "running"
-	Continue runState = "continue"
-	Finished runState = "finished"
-	Error    runState = "error"
-
-	CallConfirm runner.EventType = "callConfirm"
-	Prompt      runner.EventType = "prompt"
 )
 
 type toolDefs []types.ToolDef
@@ -52,10 +38,12 @@ type toolOrFileRequest struct {
 	cacheOptions  `json:",inline"`
 	openAIOptions `json:",inline"`
 
+	ThreadID             uint64   `json:"threadID"`
+	PreviousRunID        uint64   `json:"previousRunID"`
 	ToolDefs             toolDefs `json:"toolDefs,inline"`
 	SubTool              string   `json:"subTool"`
 	Input                string   `json:"input"`
-	ChatState            string   `json:"chatState"`
+	ChatState            any      `json:"chatState"`
 	Workspace            string   `json:"workspace"`
 	Env                  []string `json:"env"`
 	CredentialContext    string   `json:"credentialContext"`
@@ -103,35 +91,17 @@ type modelsRequest struct {
 	Providers []string `json:"providers"`
 }
 
-type runInfo struct {
-	Calls     map[string]call `json:"-"`
-	ID        string          `json:"id"`
-	Program   types.Program   `json:"program"`
-	Input     string          `json:"input"`
-	Output    string          `json:"output"`
-	Error     string          `json:"error"`
-	Start     time.Time       `json:"start"`
-	End       time.Time       `json:"end"`
-	State     runState        `json:"state"`
-	ChatState any             `json:"chatState"`
-}
-
-func newRun(id string) *runInfo {
-	return &runInfo{
-		ID:    id,
-		State: Creating,
-		Calls: make(map[string]call),
+func newRun(id uint64) *threads.RunInfo {
+	return &threads.RunInfo{
+		ID:    fmt.Sprint(id),
+		State: threads.Creating,
+		Calls: make(map[string]threads.Call),
 	}
 }
 
-type runEvent struct {
-	runInfo `json:",inline"`
-	Type    runner.EventType `json:"type"`
-}
-
-func (r *runInfo) process(e event) map[string]any {
+func process(r *threads.RunInfo, e threads.GPTScriptEvent) map[string]any {
 	switch e.Type {
-	case Prompt:
+	case threads.Prompt:
 		return map[string]any{"prompt": prompt{
 			Prompt: e.Prompt,
 			ID:     e.RunID,
@@ -141,21 +111,23 @@ func (r *runInfo) process(e event) map[string]any {
 	case runner.EventTypeRunStart:
 		r.Start = e.Time
 		r.Program = *e.Program
-		r.State = Running
+		r.State = threads.Running
 	case runner.EventTypeRunFinish:
 		r.End = e.Time
 		r.Output = e.Output
 		r.Error = e.Err
 		if r.Error != "" {
-			r.State = Error
+			r.State = threads.Error
+		} else if !e.Done {
+			r.State = threads.Continue
 		} else {
-			r.State = Finished
+			r.State = threads.Finished
 		}
 	}
 
 	if e.CallContext == nil || e.CallContext.ID == "" {
 		return map[string]any{"run": runEvent{
-			runInfo: *r,
+			RunInfo: *r,
 			Type:    e.Type,
 		}}
 	}
@@ -170,14 +142,14 @@ func (r *runInfo) process(e event) map[string]any {
 		call.Input = e.Content
 
 	case runner.EventTypeCallSubCalls:
-		call.setSubCalls(e.ToolSubCalls)
+		call.SetSubCalls(e.ToolSubCalls)
 
 	case runner.EventTypeCallProgress:
-		call.setOutput(e.Content)
+		call.SetOutput(e.Content)
 
 	case runner.EventTypeCallFinish:
 		call.End = e.Time
-		call.setOutput(e.Content)
+		call.SetOutput(e.Content)
 
 	case runner.EventTypeChat:
 		if e.ChatRequest != nil {
@@ -192,53 +164,21 @@ func (r *runInfo) process(e event) map[string]any {
 	return map[string]any{"call": call}
 }
 
-func (r *runInfo) processStdout(cs runner.ChatResponse) {
+func processStdout(r *threads.RunInfo, cs *runner.ChatResponse) {
 	if cs.Done {
-		r.State = Finished
+		r.State = threads.Finished
 	} else {
-		r.State = Continue
+		r.State = threads.Continue
 	}
 
+	r.RawOutput = cs
 	r.ChatState = cs.State
+	r.Output = cs.Content
 }
 
-type call struct {
-	engine.CallContext `json:",inline"`
-
-	Type        runner.EventType `json:"type"`
-	Start       time.Time        `json:"start"`
-	End         time.Time        `json:"end"`
-	Input       string           `json:"input"`
-	Output      []output         `json:"output"`
-	Usage       types.Usage      `json:"usage"`
-	LLMRequest  any              `json:"llmRequest"`
-	LLMResponse any              `json:"llmResponse"`
-}
-
-func (c *call) setSubCalls(subCalls map[string]engine.Call) {
-	c.Output = append(c.Output, output{
-		SubCalls: maps.Clone(subCalls),
-	})
-}
-
-func (c *call) setOutput(o string) {
-	if len(c.Output) == 0 || len(c.Output[len(c.Output)-1].SubCalls) > 0 {
-		c.Output = append(c.Output, output{
-			Content: o,
-		})
-	} else {
-		c.Output[len(c.Output)-1].Content = o
-	}
-}
-
-type output struct {
-	Content  string                 `json:"content"`
-	SubCalls map[string]engine.Call `json:"subCalls"`
-}
-
-type event struct {
-	gserver.Event `json:",inline"`
-	types.Prompt  `json:",inline"`
+type runEvent struct {
+	threads.RunInfo `json:",inline"`
+	Type            runner.EventType `json:"type"`
 }
 
 type prompt struct {

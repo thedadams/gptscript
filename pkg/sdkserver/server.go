@@ -18,6 +18,7 @@ import (
 	"github.com/gptscript-ai/gptscript/pkg/gptscript"
 	"github.com/gptscript-ai/gptscript/pkg/mvl"
 	"github.com/gptscript-ai/gptscript/pkg/runner"
+	"github.com/gptscript-ai/gptscript/pkg/sdkserver/threads"
 	"github.com/gptscript-ai/gptscript/pkg/types"
 	"github.com/rs/cors"
 )
@@ -28,6 +29,7 @@ type Options struct {
 	ListenAddress             string
 	Debug                     bool
 	DisableServerErrorLogging bool
+	ThreadsDSN                string
 }
 
 // Run will start the server and block until the server is shut down.
@@ -86,7 +88,19 @@ func run(ctx context.Context, listener net.Listener, opts Options) error {
 		mvl.SetDebug()
 	}
 
-	events := broadcaster.New[event]()
+	var (
+		store *threads.Store
+		err   error
+	)
+	if opts.ThreadsDSN != "" {
+		store, err = threads.NewStore(opts.ThreadsDSN)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+	}
+
+	events := broadcaster.New[threads.GPTScriptEvent]()
 	opts.Options.Runner.MonitorFactory = NewSessionFactory(events)
 	go events.Start(ctx)
 
@@ -108,6 +122,7 @@ func run(ctx context.Context, listener net.Listener, opts Options) error {
 		events:           events,
 		waitingToConfirm: make(map[string]chan runner.AuthorizerResponse),
 		waitingToPrompt:  make(map[string]chan map[string]string),
+		threadsStore:     store,
 	}
 	defer s.close()
 
@@ -155,6 +170,7 @@ func complete(opts ...Options) Options {
 		result.ListenAddress = types.FirstSet(opt.ListenAddress, result.ListenAddress)
 		result.Debug = types.FirstSet(opt.Debug, result.Debug)
 		result.DisableServerErrorLogging = types.FirstSet(opt.DisableServerErrorLogging, result.DisableServerErrorLogging)
+		result.ThreadsDSN = types.FirstSet(opt.ThreadsDSN, result.ThreadsDSN)
 	}
 
 	if result.ListenAddress == "" {

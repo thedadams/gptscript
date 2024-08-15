@@ -61,5 +61,15 @@ validate-docs: gen-docs
 		exit 1 \
 	;fi
 
+create-migration:
+	@if [ -z "$(NAME)" ]; then \
+		echo "NAME must be set"; \
+		exit 1 \
+	;fi
+	migrate create -ext sql -dir migrations -seq $(NAME)
+
+migrate:
+	go run migrations/cmd/main.go
+
 gen-docs:
 	go run tools/gendocs/main.go

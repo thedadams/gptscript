@@ -10,6 +10,8 @@ import (
 )
 
 type SDKServer struct {
+	ThreadsStorageDSN         string `usage:"Database to use for threads"`
+	DisableServerErrorLogging bool   `usage:"Disable server error logging, debug being true will override this"`
 	*GPTScript
 }
 
@@ -34,8 +36,10 @@ func (c *SDKServer) Run(cmd *cobra.Command, _ []string) error {
 	}
 
 	return sdkserver.Run(ctx, sdkserver.Options{
-		Options:       opts,
-		ListenAddress: c.ListenAddress,
-		Debug:         c.Debug,
+		Options:                   opts,
+		ListenAddress:             c.ListenAddress,
+		ThreadsDSN:                c.ThreadsStorageDSN,
+		Debug:                     c.Debug,
+		DisableServerErrorLogging: c.DisableServerErrorLogging && !c.Debug,
 	})
 }

@@ -3,7 +3,6 @@ package sdkserver
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"sort"
@@ -13,12 +12,14 @@ import (
 	"github.com/gptscript-ai/broadcaster"
 	"github.com/gptscript-ai/gptscript/pkg/cache"
 	gcontext "github.com/gptscript-ai/gptscript/pkg/context"
+	"github.com/gptscript-ai/gptscript/pkg/counter"
 	"github.com/gptscript-ai/gptscript/pkg/gptscript"
 	"github.com/gptscript-ai/gptscript/pkg/input"
 	"github.com/gptscript-ai/gptscript/pkg/loader"
 	"github.com/gptscript-ai/gptscript/pkg/openai"
 	"github.com/gptscript-ai/gptscript/pkg/parser"
 	"github.com/gptscript-ai/gptscript/pkg/runner"
+	"github.com/gptscript-ai/gptscript/pkg/sdkserver/threads"
 	gserver "github.com/gptscript-ai/gptscript/pkg/server"
 	"github.com/gptscript-ai/gptscript/pkg/types"
 	"github.com/gptscript-ai/gptscript/pkg/version"
@@ -28,7 +29,9 @@ type server struct {
 	gptscriptOpts  gptscript.Options
 	address, token string
 	client         *gptscript.GPTScript
-	events         *broadcaster.Broadcaster[event]
+	events         *broadcaster.Broadcaster[threads.GPTScriptEvent]
+
+	threadsStore *threads.Store
 
 	lock             sync.RWMutex
 	waitingToConfirm map[string]chan runner.AuthorizerResponse
@@ -58,6 +61,18 @@ func (s *server) addRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /confirm/{id}", s.confirm)
 	mux.HandleFunc("POST /prompt/{id}", s.prompt)
 	mux.HandleFunc("POST /prompt-response/{id}", s.promptResponse)
+
+	//mux.HandleFunc("POST /threads", s.createThread)
+	mux.HandleFunc("PATCH /threads/{id}/name", s.nameThread)
+	mux.HandleFunc("DELETE /threads/{id}", s.deleteThread)
+	mux.HandleFunc("GET /threads", s.listThreads)
+	mux.HandleFunc("GET /threads/{id}", s.getThread)
+
+	mux.HandleFunc("GET /threads/{thread_id}/runs", s.listRuns)
+	mux.HandleFunc("GET /threads/{thread_id}/runs/{id}", s.getRun)
+
+	mux.HandleFunc("GET /threads/{thread_id}/runs/{run_id}/events", s.listEvents)
+	mux.HandleFunc("GET /threads/{thread_id}/runs/{run_id}/events/{id}", s.getEvent)
 }
 
 // health just provides an endpoint for checking whether the server is running and accessible.
@@ -146,24 +161,40 @@ func (s *server) listModels(w http.ResponseWriter, r *http.Request) {
 // Then the options and tool are passed to the process function.
 func (s *server) execHandler(w http.ResponseWriter, r *http.Request) {
 	logger := gcontext.GetLogger(r.Context())
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeError(logger, w, http.StatusInternalServerError, fmt.Errorf("failed to read request body: %w", err))
-		return
-	}
 
 	reqObject := new(toolOrFileRequest)
-	if err := json.Unmarshal(body, reqObject); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(reqObject); err != nil {
 		writeError(logger, w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
 		return
 	}
 
-	ctx := gserver.ContextWithNewRunID(r.Context())
-	runID := gserver.RunIDFromContext(ctx)
-
 	// Ensure chat state is not empty.
-	if reqObject.ChatState == "" {
-		reqObject.ChatState = "null"
+	switch chatState := reqObject.ChatState.(type) {
+	case string:
+		if chatState == "" {
+			reqObject.ChatState = "null"
+		}
+	default:
+		b, err := json.Marshal(reqObject.ChatState)
+		if err != nil {
+			writeError(logger, w, http.StatusBadRequest, fmt.Errorf("failed to marshal chat state: %w", err))
+			return
+		}
+
+		reqObject.ChatState = string(b)
+	}
+
+	var threadID, id uint64
+	// Create the run in the database
+	storedRun, err := s.threadsStore.CreateRun(r.Context(), reqObject.Input, reqObject.PreviousRunID, nil)
+	if err != nil {
+		logger.Warnf("failed to store run: %v", err)
+	}
+	if storedRun != nil {
+		id = storedRun.ID
+		threadID = storedRun.ThreadID
+	} else {
+		id = uint64(counter.NextInt())
 	}
 
 	reqObject.Env = append(os.Environ(), reqObject.Env...)
@@ -177,7 +208,7 @@ func (s *server) execHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if !promptTokenAlreadySet {
 		// Append a prompt URL for this run.
-		reqObject.Env = append(reqObject.Env, fmt.Sprintf("%s=http://%s/prompt/%s", types.PromptURLEnvVar, s.address, runID), fmt.Sprintf("%s=%s", types.PromptTokenEnvVar, s.token))
+		reqObject.Env = append(reqObject.Env, fmt.Sprintf("%s=http://%s/prompt/%d", types.PromptURLEnvVar, s.address, id), fmt.Sprintf("%s=%s", types.PromptTokenEnvVar, s.token))
 	}
 
 	logger.Debugf("executing tool: %+v", reqObject)
@@ -211,7 +242,7 @@ func (s *server) execHandler(w http.ResponseWriter, r *http.Request) {
 		opts.Runner.Authorizer = s.authorize
 	}
 
-	s.execAndStream(ctx, programLoader, logger, w, opts, reqObject.ChatState, reqObject.Input, reqObject.SubTool, def)
+	s.execAndStream(gserver.ContextWithNewRunID(r.Context(), id), programLoader, logger, w, opts, threadID, id, reqObject.Input, reqObject.SubTool, reqObject.ChatState, def)
 }
 
 // load will load the file and return the corresponding Program.

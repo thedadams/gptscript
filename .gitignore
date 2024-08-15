@@ -9,3 +9,5 @@
 /binaries
 /checksums.txt
 /.env*
+
+gptscript-threads.db*

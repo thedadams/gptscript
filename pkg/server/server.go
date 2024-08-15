@@ -2,8 +2,8 @@ package server
 
 import (
 	"context"
+	"fmt"
 
-	"github.com/gptscript-ai/gptscript/pkg/counter"
 	"github.com/gptscript-ai/gptscript/pkg/runner"
 	"github.com/gptscript-ai/gptscript/pkg/types"
 )
@@ -19,8 +19,8 @@ type Event struct {
 
 type execKey struct{}
 
-func ContextWithNewRunID(ctx context.Context) context.Context {
-	return context.WithValue(ctx, execKey{}, counter.Next())
+func ContextWithNewRunID(ctx context.Context, runID uint64) context.Context {
+	return context.WithValue(ctx, execKey{}, fmt.Sprint(runID))
 }
 
 func RunIDFromContext(ctx context.Context) string {

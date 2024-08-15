@@ -10,7 +10,7 @@ import (
 	"github.com/gptscript-ai/gptscript/pkg/loader"
 	"github.com/gptscript-ai/gptscript/pkg/mvl"
 	"github.com/gptscript-ai/gptscript/pkg/runner"
-	gserver "github.com/gptscript-ai/gptscript/pkg/server"
+	"github.com/gptscript-ai/gptscript/pkg/sdkserver/threads"
 	"github.com/gptscript-ai/gptscript/pkg/types"
 )
 
@@ -24,7 +24,7 @@ func loaderWithLocation(f loaderFunc, loc string) loaderFunc {
 	}
 }
 
-func (s *server) execAndStream(ctx context.Context, programLoader loaderFunc, logger mvl.Logger, w http.ResponseWriter, opts gptscript.Options, chatState, input, subTool string, toolDef fmt.Stringer) {
+func (s *server) execAndStream(ctx context.Context, programLoader loaderFunc, logger mvl.Logger, w http.ResponseWriter, opts gptscript.Options, threadID, id uint64, input, subTool string, chatState any, toolDef fmt.Stringer) {
 	g, err := gptscript.New(ctx, s.gptscriptOpts, opts)
 	if err != nil {
 		writeError(logger, w, http.StatusInternalServerError, fmt.Errorf("failed to initialize gptscript: %w", err))
@@ -39,7 +39,7 @@ func (s *server) execAndStream(ctx context.Context, programLoader loaderFunc, lo
 	}
 
 	errChan := make(chan error)
-	programOutput := make(chan runner.ChatResponse)
+	programOutput := make(chan *runner.ChatResponse)
 	events := s.events.Subscribe()
 	defer events.Close()
 
@@ -48,34 +48,53 @@ func (s *server) execAndStream(ctx context.Context, programLoader loaderFunc, lo
 		if err != nil {
 			errChan <- err
 		} else {
-			programOutput <- run
+			programOutput <- &run
 		}
 		close(errChan)
 		close(programOutput)
 	}()
 
-	processEventStreamOutput(ctx, logger, w, gserver.RunIDFromContext(ctx), events.C, programOutput, errChan)
+	processEventStreamOutput(ctx, s.threadsStore, logger, w, threadID, id, events.C, programOutput, errChan)
 }
 
 // processEventStreamOutput will stream the events of the tool to the response as server sent events.
 // If an error occurs, then an event with the error will also be sent.
-func processEventStreamOutput(ctx context.Context, logger mvl.Logger, w http.ResponseWriter, id string, events <-chan event, output <-chan runner.ChatResponse, errChan chan error) {
-	run := newRun(id)
+func processEventStreamOutput(ctx context.Context, s *threads.Store, logger mvl.Logger, w http.ResponseWriter, threadID, runID uint64, events <-chan threads.GPTScriptEvent, output <-chan *runner.ChatResponse, errChan chan error) {
+	run := newRun(runID)
 	setStreamingHeaders(w)
 
-	streamEvents(ctx, logger, w, run, events)
+	runFinishEvent := streamEvents(ctx, logger, w, s, runID, run, events)
 
-	var out runner.ChatResponse
+	var out *runner.ChatResponse
 	select {
 	case <-ctx.Done():
 	case out = <-output:
-		run.processStdout(out)
+		processStdout(run, out)
 
 		writeServerSentEvent(logger, w, map[string]any{
 			"stdout": out,
 		})
 	case err := <-errChan:
 		writeError(logger, w, http.StatusInternalServerError, fmt.Errorf("failed to run file: %w", err))
+	}
+
+	if threadID == 0 && out != nil && !out.Done {
+		// If this run wasn't put into a thread, and it is not "done" then create a thread for it.
+		thread, err := s.CreateThread(ctx)
+		if err != nil {
+			logger.Warnf("failed to create thread: %v", err)
+		}
+
+		if thread != nil {
+			threadID = thread.ID
+		}
+	}
+
+	run.ThreadID = threadID
+
+	if runFinishEvent != nil {
+		run.ThreadID = threadID
+		writeServerSentEvent(logger, w, process(run, *runFinishEvent))
 	}
 
 	// Now that we have received all events, send the DONE event.
@@ -86,12 +105,25 @@ func processEventStreamOutput(ctx context.Context, logger mvl.Logger, w http.Res
 		}
 	}
 
+	if out != nil && !out.Done {
+		run.State = threads.Continue
+	}
+
+	if _, err := s.FinishRun(ctx, threadID, runID, run); err != nil {
+		logger.Warnf("failed to finish run: %v", err)
+	}
+
 	logger.Debugf("wrote DONE event")
 }
 
 // streamEvents will stream the events of the tool to the response as server sent events.
-func streamEvents(ctx context.Context, logger mvl.Logger, w http.ResponseWriter, run *runInfo, events <-chan event) {
+func streamEvents(ctx context.Context, logger mvl.Logger, w http.ResponseWriter, s *threads.Store, runID uint64, run *threads.RunInfo, events <-chan threads.GPTScriptEvent) *threads.GPTScriptEvent {
 	logger.Debugf("receiving events")
+
+	defer func() {
+		logger.Debugf("done receiving events")
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -101,23 +133,25 @@ func streamEvents(ctx context.Context, logger mvl.Logger, w http.ResponseWriter,
 				for range events {
 				}
 			}()
-			return
+			return nil
 		case e, ok := <-events:
 			if ok && e.RunID != run.ID {
 				continue
 			}
 
 			if !ok {
-				logger.Debugf("done receiving events")
-				return
+				return nil
 			}
 
-			writeServerSentEvent(logger, w, run.process(e))
+			if _, err := s.CreateEvent(ctx, runID, e); err != nil {
+				logger.Warnf("failed to store event: %v", err)
+			}
 
 			if e.Type == runner.EventTypeRunFinish {
-				logger.Debugf("finished receiving events")
-				return
+				return &e
 			}
+
+			writeServerSentEvent(logger, w, process(run, e))
 		}
 	}
 }

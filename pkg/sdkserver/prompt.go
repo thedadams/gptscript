@@ -9,6 +9,7 @@ import (
 	gcontext "github.com/gptscript-ai/gptscript/pkg/context"
 	"github.com/gptscript-ai/gptscript/pkg/mvl"
 	"github.com/gptscript-ai/gptscript/pkg/runner"
+	"github.com/gptscript-ai/gptscript/pkg/sdkserver/threads"
 	gserver "github.com/gptscript-ai/gptscript/pkg/server"
 	"github.com/gptscript-ai/gptscript/pkg/types"
 )
@@ -75,7 +76,7 @@ func (s *server) prompt(w http.ResponseWriter, r *http.Request) {
 		s.lock.Unlock()
 	}(id)
 
-	s.events.C <- event{
+	s.events.C <- threads.GPTScriptEvent{
 		Prompt: types.Prompt{
 			Message:   prompt.Message,
 			Fields:    prompt.Fields,
@@ -84,7 +85,7 @@ func (s *server) prompt(w http.ResponseWriter, r *http.Request) {
 		Event: gserver.Event{
 			RunID: id,
 			Event: runner.Event{
-				Type: Prompt,
+				Type: threads.Prompt,
 				Time: time.Now(),
 			},
 		},

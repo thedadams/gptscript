@@ -1,0 +1,3 @@
+CREATE TABLE `threads` (`id` integer PRIMARY KEY AUTOINCREMENT,`created_at` datetime, `updated_at` datetime, `first_run_id` integer);
+CREATE TABLE `runs` (`id` integer PRIMARY KEY AUTOINCREMENT,`started_at` datetime, `finished_at` datetime, `thread_id` integer, `previous_run_id` integer, `input` text, `output` text, `chat_state_after` JSON, `run` JSON, `calls` JSON);
+CREATE TABLE `events` (`id` integer PRIMARY KEY AUTOINCREMENT,`created_at` datetime, `run_id` integer, `event` JSON);

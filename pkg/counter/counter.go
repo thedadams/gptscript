@@ -15,3 +15,7 @@ func Reset(i int32) {
 func Next() string {
 	return fmt.Sprint(atomic.AddInt32(&counter, 1))
 }
+
+func NextInt() int32 {
+	return atomic.AddInt32(&counter, 1)
+}
